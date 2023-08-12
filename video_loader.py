@@ -37,7 +37,9 @@ class VideoDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        img_paths, pid, camid = self.dataset[index]
+        # fix for other dataset
+        img_paths, pid, camid, _ = self.dataset.data[index]
+
         num = len(img_paths)
         if self.sample == 'random':
             """
@@ -81,7 +83,8 @@ class VideoDataset(Dataset):
             while num-cur_index > self.seq_len:
                 indices_list.append(frame_indices[cur_index:cur_index+self.seq_len])
                 cur_index+=self.seq_len
-            last_seq=frame_indices[cur_index:]
+            last_seq=list(frame_indices[cur_index:])
+            # fix last_seq=frame_indices[cur_index:]
             for index in last_seq:
                 if len(last_seq) >= self.seq_len:
                     break

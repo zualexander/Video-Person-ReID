@@ -2,6 +2,7 @@ from __future__ import print_function, absolute_import
 import numpy as np
 import copy
 
+
 def evaluate(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
     num_q, num_g = distmat.shape
     if num_g < max_rank:
@@ -25,7 +26,7 @@ def evaluate(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         keep = np.invert(remove)
 
         # compute cmc curve
-        orig_cmc = matches[q_idx][keep] # binary vector, positions with value 1 are correct matches
+        orig_cmc = matches[q_idx][keep]  # binary vector, positions with value 1 are correct matches
         if not np.any(orig_cmc):
             # this condition is true when query identity does not appear in gallery
             continue
@@ -40,7 +41,7 @@ def evaluate(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         # reference: https://en.wikipedia.org/wiki/Evaluation_measures_(information_retrieval)#Average_precision
         num_rel = orig_cmc.sum()
         tmp_cmc = orig_cmc.cumsum()
-        tmp_cmc = [x / (i+1.) for i, x in enumerate(tmp_cmc)]
+        tmp_cmc = [x / (i + 1.) for i, x in enumerate(tmp_cmc)]
         tmp_cmc = np.asarray(tmp_cmc) * orig_cmc
         AP = tmp_cmc.sum() / num_rel
         all_AP.append(AP)
@@ -52,5 +53,3 @@ def evaluate(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
     mAP = np.mean(all_AP)
 
     return all_cmc, mAP
-
-

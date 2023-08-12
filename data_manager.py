@@ -424,7 +424,7 @@ class PRID(object):
 __factory = {
     'mars': Mars,
     'ilidsvid': iLIDSVID,
-    'prid': PRID,
+    'prid': PRID
 }
 
 def get_names():

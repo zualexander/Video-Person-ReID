@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torchreid
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from torch.optim import lr_scheduler
@@ -23,13 +24,14 @@ from losses import CrossEntropyLabelSmooth, TripletLoss
 from utils import AverageMeter, Logger, save_checkpoint
 from eval_metrics import evaluate
 from samplers import RandomIdentitySampler
+from Zone14Dataset import Zone14DataSet
 
 parser = argparse.ArgumentParser(description='Train video model with cross entropy loss')
 # Datasets
-parser.add_argument('-d', '--dataset', type=str, default='mars',
-                    choices=data_manager.get_names())
-parser.add_argument('-j', '--workers', default=4, type=int,
-                    help="number of data loading workers (default: 4)")
+parser.add_argument('-d', '--dataset', type=str, default='zone14',
+                    choices=['zone14'])
+parser.add_argument('-j', '--workers', default=8, type=int,
+                    help="number of data loading workers (default: 1)")
 parser.add_argument('--height', type=int, default=224,
                     help="height of an image (default: 224)")
 parser.add_argument('--width', type=int, default=112,
@@ -57,13 +59,16 @@ parser.add_argument('--num-instances', type=int, default=4,
 parser.add_argument('--htri-only', action='store_true', default=False,
                     help="if this is True, only htri loss is used in training")
 # Architecture
-parser.add_argument('-a', '--arch', type=str, default='resnet50tp', help="resnet503d, resnet50tp, resnet50ta, resnetrnn")
+parser.add_argument('-a', '--arch', type=str, default='resnet50tp',
+                    help="resnet503d, resnet50tp, resnet50ta, resnetrnn")
 parser.add_argument('--pool', type=str, default='avg', choices=['avg', 'max'])
 
 # Miscs
 parser.add_argument('--print-freq', type=int, default=80, help="print frequency")
 parser.add_argument('--seed', type=int, default=1, help="manual seed")
-parser.add_argument('--pretrained-model', type=str, default='/home/jiyang/Workspace/Works/video-person-reid/3dconv-person-reid/pretrained_models/resnet-50-kinetics.pth', help='need to be set for resnet3d models')
+parser.add_argument('--pretrained-model', type=str,
+                    default='/home/jiyang/Workspace/Works/video-person-reid/3dconv-person-reid/pretrained_models/resnet-50-kinetics.pth',
+                    help='need to be set for resnet3d models')
 parser.add_argument('--evaluate', action='store_true', help="evaluation only")
 parser.add_argument('--eval-step', type=int, default=50,
                     help="run evaluation for every N epochs (set to -1 to test after training)")
@@ -72,6 +77,7 @@ parser.add_argument('--use-cpu', action='store_true', help="use cpu")
 parser.add_argument('--gpu-devices', default='0', type=str, help='gpu device ids for CUDA_VISIBLE_DEVICES')
 
 args = parser.parse_args()
+
 
 def main():
     torch.manual_seed(args.seed)
@@ -92,8 +98,8 @@ def main():
     else:
         print("Currently using CPU (GPU is highly recommended)")
 
-    print("Initializing dataset {}".format(args.dataset))
-    dataset = data_manager.init_dataset(name=args.dataset)
+    print("Register Dataset {}".format(args.dataset))
+    torchreid.data.register_video_dataset('zone14', Zone14DataSet)
 
     transform_train = T.Compose([
         T.Random2DTranslation(args.height, args.width),
@@ -110,29 +116,33 @@ def main():
 
     pin_memory = True if use_gpu else False
 
+    train_dataset = Zone14DataSet(mode='train', seq_len=args.seq_len, sample='random', transform=transform_train)
+    query_dataset = Zone14DataSet(mode='query', seq_len=args.seq_len, sample='dense', transform=transform_test)
+    gallery_dataset = Zone14DataSet(mode='gallery', seq_len=args.seq_len, sample='dense', transform=transform_test)
 
     trainloader = DataLoader(
-        VideoDataset(dataset.train, seq_len=args.seq_len, sample='random',transform=transform_train),
-        sampler=RandomIdentitySampler(dataset.train, num_instances=args.num_instances),
+        VideoDataset(train_dataset, seq_len=args.seq_len, sample='random', transform=transform_train),
+        sampler=RandomIdentitySampler(train_dataset, num_instances=args.num_instances),
         batch_size=args.train_batch, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=True,
     )
 
     queryloader = DataLoader(
-        VideoDataset(dataset.query, seq_len=args.seq_len, sample='dense', transform=transform_test),
+        VideoDataset(query_dataset, seq_len=args.seq_len, sample='dense', transform=transform_test),
         batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=False,
     )
 
     galleryloader = DataLoader(
-        VideoDataset(dataset.gallery, seq_len=args.seq_len, sample='dense', transform=transform_test),
+        VideoDataset(gallery_dataset, seq_len=args.seq_len, sample='dense', transform=transform_test),
         batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=False,
     )
 
     print("Initializing model: {}".format(args.arch))
-    if args.arch=='resnet503d':
-        model = resnet3d.resnet50(num_classes=dataset.num_train_pids, sample_width=args.width, sample_height=args.height, sample_duration=args.seq_len)
+    if args.arch == 'resnet503d':
+        model = resnet3d.resnet50(num_classes=dataset.num_train_pids, sample_width=args.width,
+                                  sample_height=args.height, sample_duration=args.seq_len)
         if not os.path.exists(args.pretrained_model):
             raise IOError("Can't find pretrained model: {}".format(args.pretrained_model))
         print("Loading checkpoint from '{}'".format(args.pretrained_model))
@@ -143,10 +153,10 @@ def main():
             state_dict[key.partition("module.")[2]] = checkpoint['state_dict'][key]
         model.load_state_dict(state_dict, strict=False)
     else:
-        model = models.init_model(name=args.arch, num_classes=dataset.num_train_pids, loss={'xent', 'htri'})
-    print("Model size: {:.5f}M".format(sum(p.numel() for p in model.parameters())/1000000.0))
+        model = models.init_model(name=args.arch, num_classes=train_dataset.num_train_pids, loss={'xent', 'htri'})
+    print("Model size: {:.5f}M".format(sum(p.numel() for p in model.parameters()) / 1000000.0))
 
-    criterion_xent = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu)
+    criterion_xent = CrossEntropyLabelSmooth(num_classes=train_dataset.num_train_pids, use_gpu=use_gpu)
     criterion_htri = TripletLoss(margin=args.margin)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -164,16 +174,16 @@ def main():
 
     start_time = time.time()
     best_rank1 = -np.inf
-    if args.arch=='resnet503d':
+    if args.arch == 'resnet503d':
         torch.backends.cudnn.benchmark = False
     for epoch in range(start_epoch, args.max_epoch):
-        print("==> Epoch {}/{}".format(epoch+1, args.max_epoch))
-        
+        print("==> Epoch {}/{}".format(epoch + 1, args.max_epoch))
+
         train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu)
-        
+
         if args.stepsize > 0: scheduler.step()
-        
-        if args.eval_step > 0 and (epoch+1) % args.eval_step == 0 or (epoch+1) == args.max_epoch:
+
+        if args.eval_step > 0 and (epoch + 1) % args.eval_step == 0 or (epoch + 1) == args.max_epoch:
             print("==> Test")
             rank1 = test(model, queryloader, galleryloader, args.pool, use_gpu)
             is_best = rank1 > best_rank1
@@ -187,11 +197,12 @@ def main():
                 'state_dict': state_dict,
                 'rank1': rank1,
                 'epoch': epoch,
-            }, is_best, osp.join(args.save_dir, 'checkpoint_ep' + str(epoch+1) + '.pth.tar'))
+            }, is_best, osp.join(args.save_dir, 'checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
 
     elapsed = round(time.time() - start_time)
     elapsed = str(datetime.timedelta(seconds=elapsed))
     print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
+
 
 def train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu):
     model.train()
@@ -215,28 +226,30 @@ def train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu
         optimizer.step()
         losses.update(loss.data[0], pids.size(0))
 
-        if (batch_idx+1) % args.print_freq == 0:
-            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx+1, len(trainloader), losses.val, losses.avg))
+        if (batch_idx + 1) % args.print_freq == 0:
+            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx + 1, len(trainloader), losses.val, losses.avg))
+
 
 def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20]):
     model.eval()
 
     qf, q_pids, q_camids = [], [], []
-    for batch_idx, (imgs, pids, camids) in enumerate(queryloader):
-        if use_gpu:
-            imgs = imgs.cuda()
-        imgs = Variable(imgs, volatile=True)
-        # b=1, n=number of clips, s=16
-        b, n, s, c, h, w = imgs.size()
-        assert(b==1)
-        imgs = imgs.view(b*n, s, c, h, w)
-        features = model(imgs)
-        features = features.view(n, -1)
-        features = torch.mean(features, 0)
-        features = features.data.cpu()
-        qf.append(features)
-        q_pids.extend(pids)
-        q_camids.extend(camids)
+    with torch.no_grad():
+        for batch_idx, (imgs, pids, camids) in enumerate(queryloader):
+            if use_gpu:
+                imgs = imgs.cuda()
+            imgs = Variable(imgs)
+            # b=1, n=number of clips, s=16
+            b, n, s, c, h, w = imgs.size()
+            assert (b == 1)
+            imgs = imgs.view(b * n, s, c, h, w)
+            features = model(imgs)
+            features = features.view(n, -1)
+            features = torch.mean(features, 0)
+            features = features.data.cpu()
+            qf.append(features)
+            q_pids.extend(pids)
+            q_camids.extend(camids)
     qf = torch.stack(qf)
     q_pids = np.asarray(q_pids)
     q_camids = np.asarray(q_camids)
@@ -244,23 +257,24 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
     print("Extracted features for query set, obtained {}-by-{} matrix".format(qf.size(0), qf.size(1)))
 
     gf, g_pids, g_camids = [], [], []
-    for batch_idx, (imgs, pids, camids) in enumerate(galleryloader):
-        if use_gpu:
-            imgs = imgs.cuda()
-        imgs = Variable(imgs, volatile=True)
-        b, n, s, c, h, w = imgs.size()
-        imgs = imgs.view(b*n, s , c, h, w)
-        assert(b==1)
-        features = model(imgs)
-        features = features.view(n, -1)
-        if pool == 'avg':
-            features = torch.mean(features, 0)
-        else:
-            features, _ = torch.max(features, 0)
-        features = features.data.cpu()
-        gf.append(features)
-        g_pids.extend(pids)
-        g_camids.extend(camids)
+    with torch.no_grad():
+        for batch_idx, (imgs, pids, camids) in enumerate(galleryloader):
+            if use_gpu:
+                imgs = imgs.cuda()
+            imgs = Variable(imgs)
+            b, n, s, c, h, w = imgs.size()
+            imgs = imgs.view(b * n, s, c, h, w)
+            assert (b == 1)
+            features = model(imgs)
+            features = features.view(n, -1)
+            if pool == 'avg':
+                features = torch.mean(features, 0)
+            else:
+                features, _ = torch.max(features, 0)
+            features = features.data.cpu()
+            gf.append(features)
+            g_pids.extend(pids)
+            g_camids.extend(camids)
     gf = torch.stack(gf)
     g_pids = np.asarray(g_pids)
     g_camids = np.asarray(g_camids)
@@ -281,17 +295,11 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
     print("mAP: {:.1%}".format(mAP))
     print("CMC curve")
     for r in ranks:
-        print("Rank-{:<3}: {:.1%}".format(r, cmc[r-1]))
+        print("Rank-{:<3}: {:.1%}".format(r, cmc[r - 1]))
     print("------------------")
 
     return cmc[0]
 
+
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
