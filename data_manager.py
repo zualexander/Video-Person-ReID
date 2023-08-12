@@ -419,32 +419,27 @@ class PRID(object):
 
         return tracklets, num_tracklets, num_pids, num_imgs_per_tracklet
 
+
 """Create dataset"""
 
 __factory = {
-    'mars': Mars,
-    'ilidsvid': iLIDSVID,
-    'prid': PRID,
+    'zone14': Zone14DataSet
 }
+
 
 def get_names():
     return __factory.keys()
+
 
 def init_dataset(name, *args, **kwargs):
     if name not in __factory.keys():
         raise KeyError("Unknown dataset: {}".format(name))
     return __factory[name](*args, **kwargs)
 
+
 if __name__ == '__main__':
     # test
-    #dataset = Market1501()
-    #dataset = Mars()
-    dataset = iLIDSVID()
+    # dataset = Market1501()
+    # dataset = Mars()
+    dataset = Zone14DataSet(transform=)
     dataset = PRID()
-
-
-
-
-
-
-

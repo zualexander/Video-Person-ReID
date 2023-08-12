@@ -6,28 +6,31 @@ import datetime
 import argparse
 import os.path as osp
 import numpy as np
+from torchreid.data.transforms import Random2DTranslation
+from torchreid.models import resnet50
+from torchvision.transforms import Compose, RandomHorizontalFlip, ToTensor, Normalize, Resize
+
+from Zone14Dataset import Zone14DataSet
 
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torchreid
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from torch.optim import lr_scheduler
 
-import data_manager
 from video_loader import VideoDataset
-import transforms as T
-import models
-from models import resnet3d
-from losses import CrossEntropyLabelSmooth, TripletLoss
-from utils import AverageMeter, Logger, save_checkpoint
-from eval_metrics import evaluate
+from torchreid.losses import CrossEntropyLoss, TripletLoss
 from samplers import RandomIdentitySampler
+
+from torchreid.utils import AverageMeter, Logger, save_checkpoint
+from torchreid.metrics import evaluate_rank
 
 parser = argparse.ArgumentParser(description='Train video model with cross entropy loss')
 # Datasets
-parser.add_argument('-d', '--dataset', type=str, default='mars',
-                    choices=data_manager.get_names())
+parser.add_argument('-d', '--dataset', type=str, default='zone14',
+                    choices=['zone14'])
 parser.add_argument('-j', '--workers', default=4, type=int,
                     help="number of data loading workers (default: 4)")
 parser.add_argument('--height', type=int, default=224,
@@ -92,27 +95,28 @@ def main():
     else:
         print("Currently using CPU (GPU is highly recommended)")
 
-    print("Initializing dataset {}".format(args.dataset))
-    dataset = data_manager.init_dataset(name=args.dataset)
+    print("Register Dataset {}".format(args.dataset))
+    torchreid.data.register_video_dataset('zone14', Zone14DataSet)
 
-    transform_train = T.Compose([
-        T.Random2DTranslation(args.height, args.width),
-        T.RandomHorizontalFlip(),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transform_train = Compose([
+        Random2DTranslation(args.height, args.width),
+        RandomHorizontalFlip(),
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    transform_test = T.Compose([
-        T.Resize((args.height, args.width)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transform_test = Compose([
+        Resize((args.height, args.width)),
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
     pin_memory = True if use_gpu else False
 
+    dataset = Zone14DataSet()
 
     trainloader = DataLoader(
-        VideoDataset(dataset.train, seq_len=args.seq_len, sample='random',transform=transform_train),
+        VideoDataset(dataset.train, seq_len=args.seq_len, sample='random', transform=transform_train),
         sampler=RandomIdentitySampler(dataset.train, num_instances=args.num_instances),
         batch_size=args.train_batch, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=True,
@@ -131,8 +135,9 @@ def main():
     )
 
     print("Initializing model: {}".format(args.arch))
-    if args.arch=='resnet503d':
-        model = resnet3d.resnet50(num_classes=dataset.num_train_pids, sample_width=args.width, sample_height=args.height, sample_duration=args.seq_len)
+    if args.arch == 'resnet503d':
+        model = resnet50(num_classes=dataset.num_train_pids, sample_width=args.width,
+                         sample_height=args.height, sample_duration=args.seq_len)
         if not os.path.exists(args.pretrained_model):
             raise IOError("Can't find pretrained model: {}".format(args.pretrained_model))
         print("Loading checkpoint from '{}'".format(args.pretrained_model))
