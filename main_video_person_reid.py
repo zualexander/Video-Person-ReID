@@ -1,37 +1,36 @@
 from __future__ import print_function, absolute_import
+
+import argparse
+import datetime
 import os
+import os.path as osp
 import sys
 import time
-import datetime
-import argparse
-import os.path as osp
+
 import numpy as np
-from torchreid.data.transforms import Random2DTranslation
-from torchreid.models import resnet50
-from torchvision.transforms import Compose, RandomHorizontalFlip, ToTensor, Normalize, Resize
-
-from Zone14Dataset import Zone14DataSet
-
 import torch
-import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torch.nn as nn
 import torchreid
-from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from torch.optim import lr_scheduler
+from torch.utils.data import DataLoader
+from torchreid.data.transforms import Random2DTranslation
+from torchvision.transforms import RandomHorizontalFlip, ToTensor, Normalize, Resize, Compose
 
-from video_loader import VideoDataset
-from torchreid.losses import CrossEntropyLoss, TripletLoss
-from samplers import RandomIdentitySampler
-
-from torchreid.utils import AverageMeter, Logger, save_checkpoint
-from torchreid.metrics import evaluate_rank
+import models
+from Zone14Dataset import Zone14DataSet
+from eval_metrics import evaluate
+from losses import CrossEntropyLabelSmooth, TripletLoss
+from models import resnet3d
+from utils import AverageMeter, Logger, save_checkpoint
+from torchreid.data import VideoDataset
 
 parser = argparse.ArgumentParser(description='Train video model with cross entropy loss')
 # Datasets
 parser.add_argument('-d', '--dataset', type=str, default='zone14',
                     choices=['zone14'])
-parser.add_argument('-j', '--workers', default=4, type=int,
+parser.add_argument('-j', '--workers', default=1, type=int,
                     help="number of data loading workers (default: 4)")
 parser.add_argument('--height', type=int, default=224,
                     help="height of an image (default: 224)")
@@ -60,13 +59,16 @@ parser.add_argument('--num-instances', type=int, default=4,
 parser.add_argument('--htri-only', action='store_true', default=False,
                     help="if this is True, only htri loss is used in training")
 # Architecture
-parser.add_argument('-a', '--arch', type=str, default='resnet50tp', help="resnet503d, resnet50tp, resnet50ta, resnetrnn")
+parser.add_argument('-a', '--arch', type=str, default='resnet50tp',
+                    help="resnet503d, resnet50tp, resnet50ta, resnetrnn")
 parser.add_argument('--pool', type=str, default='avg', choices=['avg', 'max'])
 
 # Miscs
 parser.add_argument('--print-freq', type=int, default=80, help="print frequency")
 parser.add_argument('--seed', type=int, default=1, help="manual seed")
-parser.add_argument('--pretrained-model', type=str, default='/home/jiyang/Workspace/Works/video-person-reid/3dconv-person-reid/pretrained_models/resnet-50-kinetics.pth', help='need to be set for resnet3d models')
+parser.add_argument('--pretrained-model', type=str,
+                    default='/home/jiyang/Workspace/Works/video-person-reid/3dconv-person-reid/pretrained_models/resnet-50-kinetics.pth',
+                    help='need to be set for resnet3d models')
 parser.add_argument('--evaluate', action='store_true', help="evaluation only")
 parser.add_argument('--eval-step', type=int, default=50,
                     help="run evaluation for every N epochs (set to -1 to test after training)")
@@ -75,6 +77,7 @@ parser.add_argument('--use-cpu', action='store_true', help="use cpu")
 parser.add_argument('--gpu-devices', default='0', type=str, help='gpu device ids for CUDA_VISIBLE_DEVICES')
 
 args = parser.parse_args()
+
 
 def main():
     torch.manual_seed(args.seed)
@@ -113,31 +116,33 @@ def main():
 
     pin_memory = True if use_gpu else False
 
-    dataset = Zone14DataSet()
+    train_dataset = Zone14DataSet(mode='train', seq_len=args.seq_len, sample='random', transform=transform_train)
+    query_dataset = Zone14DataSet(mode='query', seq_len=args.seq_len, sample='dense', transform=transform_test)
+    gallery_dataset = Zone14DataSet(mode='gallery', seq_len=args.seq_len, sample='dense', transform=transform_test)
 
     trainloader = DataLoader(
-        VideoDataset(dataset.train, seq_len=args.seq_len, sample='random', transform=transform_train),
-        sampler=RandomIdentitySampler(dataset.train, num_instances=args.num_instances),
+        train_dataset,
+        sampler=torch.utils.data.sampler.RandomSampler,
         batch_size=args.train_batch, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=True,
     )
 
     queryloader = DataLoader(
-        VideoDataset(dataset.query, seq_len=args.seq_len, sample='dense', transform=transform_test),
+        query_dataset,
         batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=False,
     )
 
     galleryloader = DataLoader(
-        VideoDataset(dataset.gallery, seq_len=args.seq_len, sample='dense', transform=transform_test),
+        gallery_dataset,
         batch_size=args.test_batch, shuffle=False, num_workers=args.workers,
         pin_memory=pin_memory, drop_last=False,
     )
 
     print("Initializing model: {}".format(args.arch))
     if args.arch == 'resnet503d':
-        model = resnet50(num_classes=dataset.num_train_pids, sample_width=args.width,
-                         sample_height=args.height, sample_duration=args.seq_len)
+        model = resnet3d.resnet50(num_classes=train_dataset.num_train_pids, sample_width=args.width,
+                                  sample_height=args.height, sample_duration=args.seq_len)
         if not os.path.exists(args.pretrained_model):
             raise IOError("Can't find pretrained model: {}".format(args.pretrained_model))
         print("Loading checkpoint from '{}'".format(args.pretrained_model))
@@ -148,10 +153,10 @@ def main():
             state_dict[key.partition("module.")[2]] = checkpoint['state_dict'][key]
         model.load_state_dict(state_dict, strict=False)
     else:
-        model = models.init_model(name=args.arch, num_classes=dataset.num_train_pids, loss={'xent', 'htri'})
-    print("Model size: {:.5f}M".format(sum(p.numel() for p in model.parameters())/1000000.0))
+        model = models.init_model(name=args.arch, num_classes=train_dataset.num_train_pids, loss={'xent', 'htri'})
+    print("Model size: {:.5f}M".format(sum(p.numel() for p in model.parameters()) / 1000000.0))
 
-    criterion_xent = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids, use_gpu=use_gpu)
+    criterion_xent = CrossEntropyLabelSmooth(num_classes=train_dataset.num_train_pids, use_gpu=use_gpu)
     criterion_htri = TripletLoss(margin=args.margin)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -169,16 +174,16 @@ def main():
 
     start_time = time.time()
     best_rank1 = -np.inf
-    if args.arch=='resnet503d':
+    if args.arch == 'resnet503d':
         torch.backends.cudnn.benchmark = False
     for epoch in range(start_epoch, args.max_epoch):
-        print("==> Epoch {}/{}".format(epoch+1, args.max_epoch))
-        
+        print("==> Epoch {}/{}".format(epoch + 1, args.max_epoch))
+
         train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu)
-        
+
         if args.stepsize > 0: scheduler.step()
-        
-        if args.eval_step > 0 and (epoch+1) % args.eval_step == 0 or (epoch+1) == args.max_epoch:
+
+        if args.eval_step > 0 and (epoch + 1) % args.eval_step == 0 or (epoch + 1) == args.max_epoch:
             print("==> Test")
             rank1 = test(model, queryloader, galleryloader, args.pool, use_gpu)
             is_best = rank1 > best_rank1
@@ -192,17 +197,21 @@ def main():
                 'state_dict': state_dict,
                 'rank1': rank1,
                 'epoch': epoch,
-            }, is_best, osp.join(args.save_dir, 'checkpoint_ep' + str(epoch+1) + '.pth.tar'))
+            }, is_best, osp.join(args.save_dir, 'checkpoint_ep' + str(epoch + 1) + '.pth.tar'))
 
     elapsed = round(time.time() - start_time)
     elapsed = str(datetime.timedelta(seconds=elapsed))
     print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
 
-def train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu):
+
+def train(model, criterion_xent, criterion_htri, optimizer, trainloader: DataLoader, use_gpu):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (imgs, pids, _) in enumerate(trainloader):
+    for batch_idx, data_item in enumerate(
+            trainloader):  # additional parameter in tuple because new torchreid does that
+        imgs = data_item['img']
+        pids = data_item['pid']
         if use_gpu:
             imgs, pids = imgs.cuda(), pids.cuda()
         imgs, pids = Variable(imgs), Variable(pids)
@@ -220,8 +229,9 @@ def train(model, criterion_xent, criterion_htri, optimizer, trainloader, use_gpu
         optimizer.step()
         losses.update(loss.data[0], pids.size(0))
 
-        if (batch_idx+1) % args.print_freq == 0:
-            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx+1, len(trainloader), losses.val, losses.avg))
+        if (batch_idx + 1) % args.print_freq == 0:
+            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx + 1, len(trainloader), losses.val, losses.avg))
+
 
 def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20]):
     model.eval()
@@ -233,8 +243,8 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
         imgs = Variable(imgs, volatile=True)
         # b=1, n=number of clips, s=16
         b, n, s, c, h, w = imgs.size()
-        assert(b==1)
-        imgs = imgs.view(b*n, s, c, h, w)
+        assert (b == 1)
+        imgs = imgs.view(b * n, s, c, h, w)
         features = model(imgs)
         features = features.view(n, -1)
         features = torch.mean(features, 0)
@@ -254,8 +264,8 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
             imgs = imgs.cuda()
         imgs = Variable(imgs, volatile=True)
         b, n, s, c, h, w = imgs.size()
-        imgs = imgs.view(b*n, s , c, h, w)
-        assert(b==1)
+        imgs = imgs.view(b * n, s, c, h, w)
+        assert (b == 1)
         features = model(imgs)
         features = features.view(n, -1)
         if pool == 'avg':
@@ -286,17 +296,11 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
     print("mAP: {:.1%}".format(mAP))
     print("CMC curve")
     for r in ranks:
-        print("Rank-{:<3}: {:.1%}".format(r, cmc[r-1]))
+        print("Rank-{:<3}: {:.1%}".format(r, cmc[r - 1]))
     print("------------------")
 
     return cmc[0]
 
+
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-

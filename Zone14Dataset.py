@@ -1,8 +1,10 @@
 import os.path as osp
 import pickle
 
+from torchreid.data import VideoDataset
 
-class Zone14DataSet(object):
+
+class Zone14DataSet(VideoDataset):
     dataset_dir = 'data'
 
     def __init__(self, root='generated_data', **kwargs):
@@ -29,5 +31,6 @@ class Zone14DataSet(object):
             self.gallery = pickle.load(fp)
         with open(f'{self.root}/info/query', 'rb') as fp:
             self.query = pickle.load(fp)
-
-        self.num_train_pids =
+        #
+        # self.num_train_pids =
+        super(Zone14DataSet, self).__init__(self.train, self.query, self.gallery, **kwargs)
